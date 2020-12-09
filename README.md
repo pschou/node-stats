@@ -1,7 +1,7 @@
 # node-stats
 Simple command line utility to collect kernel / docker / nftables stats
 
-#Author's note
+# Author's note
 While building site reliability dashboards for monitoring infrastructure it became readily apparent that very few packages had everything in one place to do full docker / kubernetes monitoring.
 
 But I mean by this is the two biggest packages out in the market are node-exporter and cadvisor.
@@ -12,3 +12,21 @@ CA gives you a view of the containers / kernel namespaces, however it is disorga
 
 
 Enter node-stats.  This preprocessing for containers is done on the collection, and the node details is trimmed down to items that are most affecting infrastructure health.
+
+# Building the package
+
+Run make
+```
+make
+```
+
+Then make sure it runs as root:
+```
+sudo chown root: node-stats
+sudo chmod 1555 node-stats
+```
+
+Then to collect stats:
+```
+./node-stats
+```
