@@ -1,5 +1,5 @@
 // License:
-//     MIT License, Copyright github@paulschou.com  2020 November
+//     MIT License, Authored by github@paulschou.com  2020 November
 //
 //     Many thanks / credit goes to phuslu@hotmail.com for the source of many functions
 
