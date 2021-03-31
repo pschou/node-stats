@@ -160,6 +160,13 @@ func (m *Metrics) CollectNFTables() {
 			//fmt.Fprintf(w, "nftables_rule_packets_total{%s} %v\n", strings.Join(keys, ","), packets)
 		}
 	}
+	/*    for i := 0; i < len(users.Users); i++ {
+	          fmt.Println("User Type: " + users.Users[i].Type)
+	          fmt.Println("User Age: " + strconv.Itoa(users.Users[i].Age))
+	          fmt.Println("User Name: " + users.Users[i].Name)
+	          fmt.Println("Facebook Url: " + users.Users[i].Social.Facebook)
+	      }
+	*/
 
 }
 func printMap(dat interface{}) string {

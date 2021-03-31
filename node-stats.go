@@ -1,27 +1,66 @@
 // License:
-//     MIT License, Authored by github@paulschou.com  2020 November
-//
-//     Many thanks / credit goes to phuslu@hotmail.com for the source of many functions
+//     MIT License, Copyright phuslu@hotmail.com
+// Usage:
+//     env PORT=9101 SSH_HOST=phus.lu SSH_USER=phuslu SSH_PASS=123456 ./remote_node_exporter
+// TODO:
+//     add ssh compression support
 
 package main
 
 import (
 	"bufio"
 	"bytes"
+	//"compress/gzip"
+	//"encoding/base64"
 	"fmt"
+	//"io"
 	"io/ioutil"
+	//"net"
 	"path/filepath"
+	//"net/http"
 	"os"
+	"os/exec"
+	//"path"
 	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
+	"golang.org/x/crypto/ssh"
+	//"gopkg.in/alecthomas/kingpin.v2"
+	//"gopkg.in/yaml.v2"
+
+	"github.com/prometheus/common/log"
+	//"github.com/prometheus/common/version"
+	//"github.com/vishvananda/netlink"
 )
 
+//var (
+//	configFile = kingpin.Flag("config.file", "Remote node exporter configuration file.").Default("remote_node_exporter.yml").String()
+//)
+
+/*var (
+	Port       = os.Getenv("PORT")
+	SshHost    = os.Getenv("SSH_HOST")
+	SshPort    = os.Getenv("SSH_PORT")
+	SshUser    = os.Getenv("SSH_USER")
+	SshPass    = os.Getenv("SSH_PASS")
+	SshKey     = os.Getenv("SSH_KEY")
+	SshScript  = os.Getenv("SSH_SCRIPT")
+	RemoteAddr = os.Getenv("REMOTE_ADDR")
+)*/
+
+/*var TextfilePath string = func() string {
+	s := os.Getenv("TEXTFILE_PATH")
+	if s == "" {
+		s = "/var/lib/prometheus/node-exporter"
+	}
+	return strings.TrimSuffix(s, "/") + "/"
+}()*/
 
 var Dockers = []Docker{}
 var dms = make(map[string]string, 0)
@@ -29,7 +68,130 @@ var blk_dev = make(map[string]string, 0)
 var docker_labels = make(map[string]string, 0)
 var msec int64
 
+var service_list = make(map[string]struct{}, 0)
+
+var PreReadFileList []string = []string{
+	"/etc/storage/system_time",
+	"/proc/diskstats",
+	"/proc/driver/rtc",
+	"/proc/loadavg",
+	"/proc/meminfo",
+	"/proc/mounts",
+	"/proc/net/arp",
+	"/proc/net/dev",
+	"/proc/net/netstat",
+	"/proc/net/snmp",
+	"/proc/net/sockstat",
+	"/proc/stat",
+	"/proc/sys/fs/file-nr",
+	"/proc/sys/kernel/random/entropy_avail",
+	"/proc/sys/net/netfilter/nf_conntrack_count",
+	"/proc/sys/net/netfilter/nf_conntrack_max",
+	"/proc/vmstat",
+	"/tmp/proc/mdstat",
+	//TextfilePath + "*.prom",
+}
+
 var split func(string, int) []string = regexp.MustCompile(`\s+`).Split
+
+type Client struct {
+	Addr   string
+	Config *ssh.ClientConfig
+
+	client     *ssh.Client
+	timeOffset time.Duration
+	hasTimeout bool
+	script     string
+	mu         sync.Mutex
+}
+
+func (c *Client) connect() error {
+	c.client = nil
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.client != nil {
+		return nil
+	}
+
+	var err error
+	c.client, err = ssh.Dial("tcp", c.Addr, c.Config)
+
+	if err != nil {
+		log.Infof("ssh.Dial(\"tcp\", %#v, ...) error: %+v\n", c.Addr, err)
+		return err
+	} else {
+		log.Infof("ssh.Dial(\"tcp\", %#v, ...) ok\n", c.Addr)
+	}
+
+	session, err := c.client.NewSession()
+	if err != nil {
+		log.Infof("%v.NewSession() error: %+v, reconnecting...\n", c.client, err)
+		return err
+	}
+
+	var b bytes.Buffer
+	session.Stdout = &b
+
+	session.Run("date +%z; test -f /usr/bin/timeout; echo $?")
+	parts := strings.Split(b.String(), "\n")
+	log.Infof("session.Run() return %#v\n", parts)
+	s := strings.TrimSpace(parts[0])
+	if len(s) == 5 {
+		h, _ := strconv.Atoi(s[1:3])
+		m, _ := strconv.Atoi(s[3:5])
+		c.timeOffset = time.Duration((h*60+m)*60) * time.Second
+
+		if s[0] == '-' {
+			c.timeOffset = -c.timeOffset
+		}
+
+	}
+	if parts[1] == "0" {
+		c.hasTimeout = true
+	}
+	log.Infof("%#v timezone is %+v, has timeout command is %+v\n", c.Addr, c.timeOffset, c.hasTimeout)
+
+	return err
+
+}
+
+func (c *Client) TimeOffset() time.Duration {
+	return c.timeOffset
+}
+
+func (c *Client) Execute(cmd string) (string, error) {
+	log.Debugf("%T.Execute(%#v)\n", c, cmd)
+
+	//if c.client == nil {
+	//	c.connect()
+	//}
+
+	retry := 2
+	for i := 0; i < retry; i += 1 {
+		session, err := c.client.NewSession()
+		if err != nil {
+			if i < retry-1 {
+				log.Infof("NewSession() error: %+v, reconnecting...\n", err)
+				c.client.Close()
+				c.connect()
+				continue
+			}
+			return "", err
+		}
+		defer session.Close()
+
+		var b bytes.Buffer
+		session.Stdout = &b
+
+		err = session.Run(cmd)
+
+		return b.String(), err
+	}
+
+	return "", nil
+}
 
 type ProcFile struct {
 	Text     string
@@ -120,11 +282,61 @@ func (pf ProcFile) KVS() ([]string, map[string][]string) {
 }
 
 type Metrics struct {
+	Client *Client
 
 	name    string
 	body    bytes.Buffer
 	preread map[string]string
 }
+
+/*
+func (m *Metrics) PreRead() error {
+	m.preread = make(map[string]string)
+
+	cmd := "/bin/fgrep \"\" " + strings.Join(PreReadFileList, " ")
+
+	output, _ := m.Client.Execute(cmd)
+
+	split := func(s string) map[string]string {
+		m := make(map[string]string)
+		var lastname string
+		var b bytes.Buffer
+
+		scanner := bufio.NewScanner(strings.NewReader(s))
+		for scanner.Scan() {
+			parts := strings.SplitN(scanner.Text(), ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+
+			filename := strings.TrimSpace(parts[0])
+			line := parts[1]
+
+			if filename != lastname {
+				if lastname != "" {
+					m[lastname] = b.String()
+				}
+				b.Reset()
+				lastname = filename
+			}
+
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		m[lastname] = b.String()
+		return m
+	}
+
+	m.preread = split(output)
+
+	for _, filename := range PreReadFileList {
+		if _, ok := m.preread[filename]; !ok {
+			m.preread[filename] = ""
+		}
+	}
+
+	return nil
+}*/
 
 func (m *Metrics) Files() []string {
 	files := []string{}
@@ -135,6 +347,12 @@ func (m *Metrics) Files() []string {
 }
 
 func (m *Metrics) ReadFile(filename string) (string, error) {
+	//s, ok := m.preread[filename]
+	//if ok {
+	//	return s, nil
+	//}
+
+	//return m.Client.Execute("/bin/cat " + filename)
 	s, err := ioutil.ReadFile(filename)
 	return string(s), err
 }
@@ -160,6 +378,25 @@ func (m *Metrics) PrintFloat(labels string, value float64) {
 	}
 
 	m.body.WriteString(fmt.Sprintf("%-16g %d\n", value, msec))
+	//if value >= 1000000 {
+	//	m.body.WriteString(fmt.Sprintf("%e\n", value))
+	//} else {
+	//	m.body.WriteString(fmt.Sprintf("%f\n", value))
+	//}
+}
+
+func (m *Metrics) PrintBool(labels string, value bool) {
+	if labels != "" {
+		m.body.WriteString(fmt.Sprintf("%s{%s} ", m.name, labels))
+	} else {
+		m.body.WriteString(fmt.Sprintf("%s ", m.name))
+	}
+
+	if value {
+		m.body.WriteString(fmt.Sprintf("1 %d\n", msec))
+	} else {
+		m.body.WriteString(fmt.Sprintf("0 %d\n", msec))
+	}
 }
 
 func (m *Metrics) PrintStr(labels string, value string) {
@@ -179,11 +416,48 @@ func (m *Metrics) PrintInt(labels string, value int64) {
 		m.body.WriteString(fmt.Sprintf("%s ", m.name))
 	}
 
+	//if value >= 1000000 {
+	//	m.body.WriteString(fmt.Sprintf("%g\n", float64(value)))
+	//} else {
 	m.body.WriteString(fmt.Sprintf("%d %d\n", value, msec))
+	//}
 }
 
 func (m *Metrics) PrintRaw(s string) {
 	m.body.WriteString(s)
+}
+
+func (m *Metrics) CollectTime() error {
+	var t time.Time
+	var nsec int64
+
+	s, err := m.ReadFile("/proc/driver/rtc")
+
+	if s != "" {
+		_, kv := (ProcFile{Text: s, Sep: ":"}).KV()
+		date := kv["rtc_date"] + " " + kv["rtc_time"]
+		t, err = time.Parse("2006-01-02 15:04:05", date)
+		nsec = t.Unix()
+		//nsec += int64(m.Client.TimeOffset() / time.Second)
+	}
+
+	if nsec == 0 {
+		s, err = m.ReadFile("/etc/storage/system_time")
+		nsec, err = (ProcFile{Text: s}).Int()
+	}
+
+	if nsec == 0 {
+		s, err = m.Client.Execute("date +%s")
+		nsec, err = (ProcFile{Text: s}).Int()
+	}
+
+	if nsec != 0 {
+		m.PrintType("node_time", "counter", "System time in seconds since epoch (1970)")
+		m.PrintInt("", nsec)
+		msec = nsec * 1e3
+	}
+
+	return err
 }
 
 func (m *Metrics) CollectLoadavg() error {
@@ -255,6 +529,45 @@ func (m *Metrics) CollectNfConntrack() error {
 	return err
 }
 
+func (m *Metrics) CollectKernel() error {
+	out, err := exec.Command("/usr/bin/uname", "-r").Output()
+	m.PrintType("node_kernel_info", "gauge", "Running kernel")
+	m.PrintInt(fmt.Sprintf("version=%q", strings.TrimSpace(string(out))), 1)
+	return err
+}
+func (m *Metrics) CollectSystemd() error {
+	var typePrinted bool
+	for proc := range service_list {
+		out, err := exec.Command("/usr/bin/systemctl", "--no-pager", "show", proc).Output()
+		if err == nil {
+			prop := make(map[string]string, 0)
+			for _, line := range strings.Split(string(out), "\n") {
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) == 2 {
+					prop[parts[0]] = strings.TrimSpace(string(parts[1]))
+				}
+				//fmt.Println("NS output = ", parts)
+			}
+			if !typePrinted {
+				m.PrintType("node_systemd_unit_state", "gauge", "Running kernel")
+			}
+			for _, state := range []string{"activating", "active", "deactiviating", "failed", "inactive"} {
+				m.PrintBool(fmt.Sprintf("name=%q,state=%q", proc, state), state == prop["ActiveState"])
+			}
+			if !typePrinted {
+				m.PrintType("node_systemd_unit_start_time_seconds", "gauge", "Systemd start time since boot")
+				typePrinted = true
+			}
+			//val, _ := time.Parse("2006-01-02T15:04:05.000Z", prop["ActiveEnterTimestamp"])
+			//m.PrintInt(fmt.Sprintf("name=%q", proc), val.Unix())
+			val, _ := strconv.ParseUint(prop["ExecMainStartTimestampMonotonic"], 10, 64)
+			m.PrintStr(fmt.Sprintf("name=%q", proc), fmt.Sprintf("%d.%06d", val/1e6, val%1e6))
+		}
+	}
+	//fmt.Println("NS err = ", err)
+	return nil
+}
+
 func (m *Metrics) CollectMemory() error {
 	s, err := m.ReadFile("/proc/meminfo")
 	s = strings.Replace(strings.Replace(s, "(", "_", -1), ")", "", -1)
@@ -262,6 +575,7 @@ func (m *Metrics) CollectMemory() error {
 	_, kv := (ProcFile{Text: s, Sep: ":"}).KV()
 
 	for key, value := range kv {
+		//fmt.Printf("memory - key  %v value %v\n", key, value)
 		parts := split(value, -1)
 		if len(parts) == 0 {
 			continue
@@ -272,11 +586,13 @@ func (m *Metrics) CollectMemory() error {
 			continue
 		}
 
-		if len(parts) == 2 {
+		unit := ""
+		if len(parts) == 2 && parts[1] == "kB" {
 			size *= 1024
+			unit = "_bytes"
 		}
 
-		m.PrintType(fmt.Sprintf("node_memory_%s", key), "gauge", "")
+		m.PrintType(fmt.Sprintf("node_memory_%s"+unit, key), "gauge", "")
 		m.PrintInt("", size)
 	}
 	err = filepath.Walk("/sys/fs/cgroup/memory", func(path string, info os.FileInfo, err error) error {
@@ -286,10 +602,11 @@ func (m *Metrics) CollectMemory() error {
 				lbl := ""
 				if strings.HasPrefix(t, "docker/") {
 					docker_id := t[7:]
-					lbl = docker_labels[docker_id]
+					lbl = "," + docker_labels[docker_id]
 				}
 				if strings.HasPrefix(t, "system.slice/") && strings.HasSuffix(t, ".service") {
 					service_id := t[13 : len(t)-8]
+					service_list[service_id] = struct{}{}
 					lbl = fmt.Sprintf("%s,service=\"%s\"", lbl, service_id)
 				}
 
@@ -500,10 +817,11 @@ func (m *Metrics) CollectStat() error {
 				lbl := ""
 				if strings.HasPrefix(t, "docker/") {
 					docker_id := t[7:]
-					lbl = docker_labels[docker_id]
+					lbl = "," + docker_labels[docker_id]
 				}
 				if strings.HasPrefix(t, "system.slice/") && strings.HasSuffix(t, ".service") {
 					service_id := t[13 : len(t)-8]
+					service_list[service_id] = struct{}{}
 					lbl = fmt.Sprintf("%s,service=\"%s\"", lbl, service_id)
 				}
 
@@ -652,7 +970,7 @@ func (m *Metrics) CollectThreads() error {
 
 	s, err = m.ReadFile("/proc/sys/vm/max_map_count")
 	if err == nil {
-		m.PrintType("node_procs_map_count_maximum", "gauge", "Maximum threads")
+		m.PrintType("node_procs_map_count_maximum", "gauge", "Maximum number of memory map areas a process may have")
 		m.PrintStr("", strings.TrimSpace(s))
 	}
 
@@ -725,6 +1043,7 @@ func (m *Metrics) CollectDiskstats() error {
 		}
 	}
 
+	//fmt.Println("readdir", findDirs("/sys/fs/cgroup/blkio", "blkio.throttle.io_serviced"))
 
 	err = filepath.Walk("/sys/fs/cgroup/blkio", func(path string, info os.FileInfo, err error) error {
 		if info.Name() == "blkio.throttle.io_serviced" {
@@ -733,7 +1052,7 @@ func (m *Metrics) CollectDiskstats() error {
 				lbl := ""
 				if strings.HasPrefix(t, "docker/") {
 					docker_id := t[7:]
-					lbl = docker_labels[docker_id]
+					lbl = "," + docker_labels[docker_id]
 				}
 				if strings.HasPrefix(t, "system.slice/") && strings.HasSuffix(t, ".service") {
 					service_id := t[13 : len(t)-8]
@@ -800,14 +1119,16 @@ type FilesystemInfo struct {
 	MountPoint string
 	FSType     string
 	Device     string
+	MntFlags   string
+	ReadOnly   bool
 	Size       int64
 	Used       int64
 	Avail      int64
 	Files      int64
 	FilesFree  int64
+	FilesUsed  int64
 }
 
-/*
 func (m *Metrics) CollectFilesystem() error {
 	s, err := m.ReadFile("/proc/mounts")
 	if err != nil {
@@ -819,7 +1140,7 @@ func (m *Metrics) CollectFilesystem() error {
 	scanner := bufio.NewScanner(strings.NewReader(s))
 	for scanner.Scan() {
 		parts := split(strings.TrimSpace(scanner.Text()), -1)
-		device, mountpoint, fstype := parts[0], parts[1], parts[2]
+		device, mountpoint, fstype, flags := parts[0], parts[1], parts[2], parts[3]
 
 		if regexp.MustCompile(defIgnoredMountPoints).MatchString(mountpoint) {
 			continue
@@ -828,106 +1149,189 @@ func (m *Metrics) CollectFilesystem() error {
 			continue
 		}
 
+		readOnly := false
+		for _, f := range strings.Split(flags, ",") {
+			//fmt.Println("flag == ", f)
+			if f == "ro" {
+				readOnly = true
+			}
+		}
+
 		mountpoints[mountpoint] = FilesystemInfo{
 			MountPoint: mountpoint,
 			FSType:     fstype,
 			Device:     device,
+			MntFlags:   flags,
+			ReadOnly:   readOnly,
 		}
 	}
 
-	cmd := "df"
-	//if m.Client.hasTimeout {
-	//	cmd = "timeout 3 df"
-	//}
-	args := ""
-	for mountpoint := range mountpoints {
-		args += " " + mountpoint
-	}
-	cmd = fmt.Sprintf("%s %s ; %s -i %s", cmd, args, cmd, args)
+	/*
+			cmd := "df"
+			if m.Client.hasTimeout {
+				cmd = "timeout 3 df"
+			}
+			args := ""
+			for mountpoint := range mountpoints {
+				args += " " + mountpoint
+			}
+			cmd = fmt.Sprintf("%s %s ; %s -i %s", cmd, args, cmd, args)
 
-	//s, err = m.Client.Execute(cmd)
-	//if err != nil && s == "" {
-	//	return err
-	//}
+			s, err = m.Client.Execute(cmd)
+			if err != nil && s == "" {
+				return err
+			}
 
-	if s == "" {
-		return fmt.Errorf("df timed out")
-	}
+			if s == "" {
+				return fmt.Errorf("df timed out")
+			}
 
-	scanner = bufio.NewScanner(strings.NewReader(s))
-	isInodesLine := false
-	for scanner.Scan() {
-		parts := split(strings.TrimSpace(scanner.Text()), -1)
+		scanner = bufio.NewScanner(strings.NewReader(s))
+		isInodesLine := false
+		for scanner.Scan() {
+			parts := split(strings.TrimSpace(scanner.Text()), -1)
 
-		if parts[0] == "Filesystem" {
-			isInodesLine = parts[1] == "Inodes"
-			continue
+			if parts[0] == "Filesystem" {
+				isInodesLine = parts[1] == "Inodes"
+				continue
+			}
+
+			size, used, avail, mountpoint := parts[1], parts[2], parts[3], parts[5]
+
+			fi, ok := mountpoints[mountpoint]
+			if !ok {
+				continue
+			}
+
+			if n, err := strconv.ParseInt(size, 10, 64); err == nil {
+				if !isInodesLine {
+					fi.Size = n * 1024
+				} else {
+					fi.Files = n
+				}
+			}
+			if n, err := strconv.ParseInt(used, 10, 64); err == nil {
+				if !isInodesLine {
+					fi.Used = n * 1024
+				}
+			}
+			if n, err := strconv.ParseInt(avail, 10, 64); err == nil {
+				if !isInodesLine {
+					fi.Avail = n * 1024
+				} else {
+					fi.FilesFree = n
+				}
+			}
+
+			mountpoints[mountpoint] = fi
 		}
 
-		size, used, avail, mountpoint := parts[1], parts[2], parts[3], parts[5]
+	*/
+	// "--all", "--sync",
+	out, err := exec.Command("df", "--block-size=1024", "--output=source,target,fstype,itotal,iavail,iused,size,avail,used").Output()
+	if err == nil {
 
-		fi, ok := mountpoints[mountpoint]
-		if !ok {
-			continue
+		scanner = bufio.NewScanner(strings.NewReader(string(out)))
+		for scanner.Scan() {
+			parts := split(strings.TrimSpace(scanner.Text()), -1)
+			if parts[0] == "Filesystem" {
+				continue
+			}
+			fi, ok := mountpoints[parts[1]]
+
+			if ok {
+				//fmt.Println("found ", parts)
+				fi.FSType = parts[2]
+				fi.Files, err = strconv.ParseInt(parts[3], 10, 64)
+				fi.FilesFree, err = strconv.ParseInt(parts[4], 10, 64)
+				fi.FilesUsed, err = strconv.ParseInt(parts[5], 10, 64)
+				fi.Size, err = strconv.ParseInt(parts[6], 10, 64)
+				fi.Avail, err = strconv.ParseInt(parts[7], 10, 64)
+				fi.Used, err = strconv.ParseInt(parts[8], 10, 64)
+				mountpoints[parts[1]] = fi
+			}
+
 		}
 
-		if n, err := strconv.ParseInt(size, 10, 64); err == nil {
-			if !isInodesLine {
-				fi.Size = n * 1024
-			} else {
-				fi.Files = n
+		m.PrintType("node_filesystem_size", "gauge", "Filesystem size in bytes")
+		for _, fi := range mountpoints {
+			if fi.Size > 0 {
+				m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.Size)
 			}
 		}
-		if n, err := strconv.ParseInt(used, 10, 64); err == nil {
-			if !isInodesLine {
-				fi.Used = n * 1024
-			}
-		}
-		if n, err := strconv.ParseInt(avail, 10, 64); err == nil {
-			if !isInodesLine {
-				fi.Avail = n * 1024
-			} else {
-				fi.FilesFree = n
+
+		m.PrintType("node_filesystem_free", "gauge", "Filesystem free space in bytes")
+		for _, fi := range mountpoints {
+			if fi.Size > 0 {
+				m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.Size-fi.Used)
 			}
 		}
 
-		mountpoints[mountpoint] = fi
+		m.PrintType("node_filesystem_avail", "gauge", "Filesystem space available to non-root users in bytes")
+		for _, fi := range mountpoints {
+			if fi.Size > 0 {
+				m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.Avail)
+			}
+		}
+
+		m.PrintType("node_filesystem_files", "gauge", "Filesystem inodes number")
+		for _, fi := range mountpoints {
+			if fi.Size > 0 {
+				m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.Files)
+			}
+		}
+
+		m.PrintType("node_filesystem_files_free", "gauge", "Filesystem inodes free number")
+		for _, fi := range mountpoints {
+			if fi.Size > 0 {
+				m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.FilesFree)
+			}
+		}
 	}
 
-	m.PrintType("node_filesystem_size", "gauge", "Filesystem size in bytes")
+	m.PrintType("node_filesystem_readonly", "gauge", "Filesystem readonly")
 	for _, fi := range mountpoints {
-		m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.Size)
-	}
-
-	m.PrintType("node_filesystem_free", "gauge", "Filesystem free space in bytes")
-	for _, fi := range mountpoints {
-		m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.Size-fi.Used)
-	}
-
-	m.PrintType("node_filesystem_avail", "gauge", "Filesystem space available to non-root users in bytes")
-	for _, fi := range mountpoints {
-		m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.Avail)
-	}
-
-	m.PrintType("node_filesystem_files", "gauge", "Filesystem inodes number")
-	for _, fi := range mountpoints {
-		m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.Files)
-	}
-
-	m.PrintType("node_filesystem_files_free", "gauge", "Filesystem inodes free number")
-	for _, fi := range mountpoints {
-		m.PrintInt(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.FilesFree)
+		if fi.Size > 0 {
+			m.PrintBool(fmt.Sprintf("device=\"%s\",fstype=\"%s\",mountpoint=\"%s\"", fi.Device, fi.FSType, fi.MountPoint), fi.ReadOnly)
+		}
 	}
 
 	return nil
 }
-*/
+
+/*func (m *Metrics) CollectTextfile() error {
+	for _, name := range m.Files() {
+		if !strings.HasPrefix(name, TextfilePath) {
+			continue
+		}
+		s, err := m.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		m.PrintRaw(string(s))
+	}
+	return nil
+}*/
+
+func (m *Metrics) CollectScript() error {
+	cmd := fmt.Sprintf("echo %s | base64 -d | gunzip | sh", m.Client.script)
+	output, _ := m.Client.Execute(cmd)
+	m.PrintRaw(output)
+	return nil
+}
 
 func (m *Metrics) CollectAll() (string, error) {
+	//var err error
+
+	//err = m.PreRead()
+	//if err != nil {
+	//	log.Infof("%T.PreRead() error: %+v\n", m, err)
+	//}
 
 	Dockers = getDocker() // This needs to be called early because it is used for later routines
 	msec = time.Now().UnixNano() / 1e6
 
+	//m.CollectTime()
 	m.CollectLoadavg()
 	m.CollectFilefd()
 	m.CollectNfConntrack()
@@ -941,17 +1345,93 @@ func (m *Metrics) CollectAll() (string, error) {
 	m.CollectNetdev(0, "")
 	for _, d := range Dockers {
 		//fmt.Println("docker", d)
-		t := fmt.Sprintf(",docker_name=\"%s\",docker_image=\"%s\"", d.cont.Name, d.Image)
+		t := fmt.Sprintf("docker_name=\"%s\",docker_image=\"%s\"", d.cont.Name, d.Image)
 		m.CollectNetdev(d.cont.State.Pid, t)
 		docker_labels[d.Id] = t
 	}
+
+	m.PrintType("node_docker_started_at", "gauge", "Docker created time")
+	for _, d := range Dockers {
+		if d.cont.State.StartedAt.UnixNano() > 0 {
+			m.PrintInt(docker_labels[d.Id], d.cont.State.StartedAt.UnixNano()/1e6)
+		} else {
+			//m.PrintStr(docker_labels[d.Id], "NaN")
+		}
+	}
+
+	m.PrintType("node_docker_finished_at", "gauge", "Docker created time")
+	for _, d := range Dockers {
+		if d.cont.State.FinishedAt.UnixNano() > 0 {
+			m.PrintInt(docker_labels[d.Id], d.cont.State.FinishedAt.UnixNano()/1e6)
+		} else {
+			//m.PrintStr(docker_labels[d.Id], "NaN")
+		}
+	}
+
+	m.PrintType("node_docker_info", "gauge", "Docker info")
+	for _, d := range Dockers {
+		lblarr := make(map[string]string)
+		for l, v := range d.Labels {
+			lblarr[strings.ToLower(l)] = v
+		}
+		lblstr := []string{docker_labels[d.Id]}
+		reg, _ := regexp.Compile("[^a-zA-Z0-9_]+")
+		for l, v := range lblarr {
+			lblstr = append(lblstr, fmt.Sprintf("%s=%q", reg.ReplaceAllString(l, "_"), v))
+		}
+		m.PrintInt(strings.Join(lblstr, ","), 1)
+	}
+
+	m.PrintType("node_docker_running", "gauge", "Docker container is running")
+	for _, d := range Dockers {
+		m.PrintBool(docker_labels[d.Id], d.cont.State.Running)
+	}
+	m.PrintType("node_docker_restarting", "gauge", "Docker container is running")
+	for _, d := range Dockers {
+		m.PrintBool(docker_labels[d.Id], d.cont.State.Restarting)
+	}
+	m.PrintType("node_docker_restart_count", "gauge", "Docker restart count")
+	for _, d := range Dockers {
+		m.PrintInt(docker_labels[d.Id], d.cont.RestartCount)
+	}
+
+	/*
+	   type Docker struct {
+	     Id      string
+	     Names   []string
+	     Image   string
+	     Created int64
+	     State   string
+	     Labels  map[string]string
+	     cont    Container
+	   }
+	   type ContainerState struct {
+	     Status     string
+	     Running    bool
+	     Paused     bool
+	     Restarting bool
+	     OOMKilled  bool
+	     Pid        int64
+	     StartedAt  time.Time
+	     FinishedAt time.Time
+	   }
+	   type Container struct {
+	     State        ContainerState
+	     LogPath      string
+	     Name         string
+	     RestartCount int64
+	   }
+	*/
+
 	m.CollectNFTables()
 
 	m.CollectDiskstats()
 	//m.CollectMDStat()
 	m.CollectStat()
 	m.CollectMemory()
-	//m.CollectFilesystem()
+	m.CollectSystemd()
+	m.CollectKernel()
+	m.CollectFilesystem()
 	//m.CollectTextfile()
 	//m.CollectScript()
 
@@ -961,6 +1441,33 @@ func (m *Metrics) CollectAll() (string, error) {
 
 	return m.body.String(), nil
 }
+
+/*func Forward(lconn net.Conn) {
+	addr := net.JoinHostPort(SshHost, SshPort)
+	config := &ssh.ClientConfig{
+		User: SshUser,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(SshPass),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         8 * time.Second,
+	}
+
+	c, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		log.Infof("ssh.Dial(%#v) error: %+v\n", addr, err)
+		return
+	}
+
+	rconn, err := c.Dial("tcp", RemoteAddr)
+	if err != nil {
+		log.Infof("%T.Dial(%#v) error: %+v\n", RemoteAddr, err)
+		return
+	}
+
+	go io.Copy(rconn, lconn)
+	io.Copy(lconn, rconn)
+}*/
 
 func SetProcessName(name string) error {
 	if runtime.GOOS == "linux" {
@@ -977,14 +1484,214 @@ func SetProcessName(name string) error {
 }
 
 func main() {
+	fmt.Println("#ABOUT: NodeStats written by Paul Schou -- https://github.com/pschou/node-stats")
+	/*
+		log.AddFlags(kingpin.CommandLine)
+		kingpin.Version(version.Print("remote_node_exporter"))
+		kingpin.HelpFlag.Short('h')
+		kingpin.Parse()
+
+		log.Infoln("Starting remote_node_exporter", version.Info())
+		log.Infoln("Build context", version.BuildContext())
+
+		if SshHost == "" {
+			type Config struct {
+				Exporter []struct {
+					Host   string
+					Port   int
+					User   string
+					Pass   string
+					Key    string
+					Local  int
+					Script string
+				}
+				Forward []struct {
+					Host   string
+					Port   int
+					User   string
+					Pass   string
+					Key    string
+					Local  int
+					Remote string
+				}
+			}
+
+			config := &Config{}
+
+			exe, err := os.Executable()
+			if err != nil {
+				log.Fatalf("error: %v", err)
+			}
+
+			ConfigPaths := []string{
+				*configFile,
+				path.Join(path.Dir(exe), path.Base(*configFile)),
+			}
+
+			var data []byte
+			for _, filename := range ConfigPaths {
+				data, err = ioutil.ReadFile(filename)
+				if err == nil {
+					break
+				}
+			}
+			if err != nil {
+				log.Fatalf("error: read %+v %v", ConfigPaths, err)
+			}
+
+			err = yaml.Unmarshal(data, &config)
+			if err != nil {
+				log.Fatalf("error: %v", err)
+			}
+
+			for _, s := range config.Exporter {
+				if s.Host == "" {
+					log.Fatalf("error: %#v host is empty", s)
+				}
+				if s.Port == 0 {
+					s.Port = 22
+				}
+				cmd := exec.Command(exe)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Env = append(os.Environ(),
+					"SSH_HOST="+s.Host,
+					"SSH_PORT="+strconv.Itoa(s.Port),
+					"SSH_USER="+s.User,
+					"SSH_PASS="+s.Pass,
+					"SSH_KEY="+s.Key,
+					"SSH_SCRIPT="+s.Script,
+					"PORT="+strconv.Itoa(s.Local),
+				)
+				go cmd.Run()
+			}
+
+			for _, s := range config.Forward {
+				if s.Host == "" {
+					log.Fatalf("error: %#v host is empty", s)
+				}
+				if s.Port == 0 {
+					s.Port = 22
+				}
+				cmd := exec.Command(exe)
+				cmd.Env = append(os.Environ(),
+					"SSH_HOST="+s.Host,
+					"SSH_PORT="+strconv.Itoa(s.Port),
+					"SSH_USER="+s.User,
+					"SSH_PASS="+s.Pass,
+					"SSH_KEY="+s.Key,
+					"PORT="+strconv.Itoa(s.Local),
+					"REMOTE_ADDR="+s.Remote,
+				)
+				go cmd.Run()
+			}
+
+			SetProcessName("remote_node_exporter: master process " + exe)
+			select {}
+		}
+
+		if SshPort == "" {
+			SshPort = "22"
+		}
+
+		if RemoteAddr != "" {
+			SetProcessName(fmt.Sprintf("remote_node_exporter: [%s@%s] listening %s tunneling remote %s", SshUser, SshHost, Port, RemoteAddr))
+			for {
+				ln, err := net.Listen("tcp", ":"+Port)
+				if err != nil {
+					SetProcessName(fmt.Sprintf("remote_node_exporter: [%s@%s] listening %s error: %+v", SshUser, SshHost, Port, err))
+					select {}
+				}
+
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						time.Sleep(100 * time.Millisecond)
+					}
+					go Forward(conn)
+				}
+			}
+			return
+		}
+
+		client := &Client{
+			Addr: net.JoinHostPort(SshHost, SshPort),
+			Config: &ssh.ClientConfig{
+				User: SshUser,
+				Auth: []ssh.AuthMethod{
+					ssh.Password(SshPass),
+				},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				Timeout:         8 * time.Second,
+			},
+		}
+
+		if SshKey != "" {
+			key, err := ioutil.ReadFile(SshKey)
+			if err != nil {
+				log.Fatalf("unable to read private key: %v", err)
+			}
+
+			// Create the Signer for this private key.
+			signer, err := ssh.ParsePrivateKey(key)
+			if err != nil {
+				log.Fatalf("unable to parse private key: %v", err)
+			}
+
+			client.Config.Auth[0] = ssh.PublicKeys(signer)
+		}
+
+		if SshScript != "" {
+			data, err := ioutil.ReadFile(SshScript)
+			if err != nil {
+				log.Fatalf("unable to read private key: %v", err)
+			}
+
+			var b bytes.Buffer
+			w := gzip.NewWriter(&b)
+			w.Write(data)
+			w.Flush()
+
+			client.script = base64.StdEncoding.EncodeToString(b.Bytes())
+		}
+	*/
+
 	//http.HandleFunc("/metrics", func(rw http.ResponseWriter, req *http.Request) {
-	m := Metrics{}
+	m := Metrics{
+		//	Client: client,
+	}
 
 	s, err := m.CollectAll()
-	fmt.Println(s)
 	if err != nil {
 		//	http.Error(rw, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	fmt.Println(s)
 
+	/*if strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") {
+		rw.Header().Set("Content-Encoding", "gzip")
+		rw.Header().Set("Content-Type", "text/plain")
+		rw.WriteHeader(http.StatusOK)
+		w := gzip.NewWriter(rw)
+		io.WriteString(w, s)
+		w.Close()
+	} else {
+		io.WriteString(rw, s)
+	}*/
+	//})
+
+	/*http.HandleFunc("/", func(rw http.ResponseWriter, req *http.Request) {
+		io.WriteString(rw, `<html>
+			<head><title>Node Exporter</title></head>
+			<body>
+			<h1>Node Exporter</h1>
+			<p><a href="/metrics">Metrics</a></p>
+			</body>
+			</html>`)
+	})
+
+	SetProcessName(fmt.Sprintf("remote_node_exporter: [%s@%s] listening %s", SshUser, SshHost, Port))
+
+	log.Fatal(http.ListenAndServe(":"+Port, nil))*/
+	//fmt.Println("#EOF")
 }
