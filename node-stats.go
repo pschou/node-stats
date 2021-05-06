@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	//"path"
+	"github.com/pschou/go-params"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -1483,7 +1484,12 @@ func SetProcessName(name string) error {
 	return nil
 }
 
+var version = "0"
+
 func main() {
+	params.CommandLine.Title = "node-stats, a prometheus metrics collector, Written by Paul Schou (github.com/pschou/node-stats), Version: " + version
+	params.Parse()
+
 	fmt.Println("#ABOUT: NodeStats written by Paul Schou -- https://github.com/pschou/node-stats")
 	/*
 		log.AddFlags(kingpin.CommandLine)
