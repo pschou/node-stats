@@ -10,7 +10,7 @@ import (
 )
 
 func Docker_sock(req string) string {
-	c, err := net.Dial("unix", "/var/run/docker.sock")
+	c, err := net.DialTimeout("unix", "/var/run/docker.sock", time.Second*3)
 	if err != nil {
 		return ""
 	}
@@ -18,6 +18,13 @@ func Docker_sock(req string) string {
 
 	reply := make(chan string)
 	go func(r io.Reader) {
+		// Write and then read
+		_, err = c.Write([]byte(fmt.Sprintf("GET %s HTTP/1.0\nHost: localhost\nAccept: */*\n\n", req)))
+		if err != nil {
+			reply <- ""
+			return
+		}
+
 		str := ""
 		buf := make([]byte, 10240)
 		for {
@@ -33,12 +40,13 @@ func Docker_sock(req string) string {
 		}
 	}(c)
 
-	_, err = c.Write([]byte(fmt.Sprintf("GET %s HTTP/1.0\nHost: localhost\nAccept: */*\n\n", req)))
-	if err != nil {
-		return ""
+	select {
+	case str := <-reply:
+		return strings.SplitN(str, "\r\n\r\n", 2)[1]
+	case <-time.After(3 * time.Second):
+		break
 	}
-	str := <-reply
-	return strings.SplitN(str, "\r\n\r\n", 2)[1]
+	return ""
 }
 func getDocker() []Docker {
 	dockers := make([]Docker, 0)

@@ -285,9 +285,10 @@ func (pf ProcFile) KVS() ([]string, map[string][]string) {
 type Metrics struct {
 	Client *Client
 
-	name    string
-	body    bytes.Buffer
-	preread map[string]string
+	name string
+	body bytes.Buffer
+	//preread map[string]string
+	metric_count map[string]int
 }
 
 /*
@@ -339,13 +340,13 @@ func (m *Metrics) PreRead() error {
 	return nil
 }*/
 
-func (m *Metrics) Files() []string {
+/*func (m *Metrics) Files() []string {
 	files := []string{}
 	for f := range m.preread {
 		files = append(files, f)
 	}
 	return files
-}
+}*/
 
 func (m *Metrics) ReadFile(filename string) (string, error) {
 	//s, ok := m.preread[filename]
@@ -358,17 +359,18 @@ func (m *Metrics) ReadFile(filename string) (string, error) {
 	return string(s), err
 }
 
-var metric_count = make(map[string]int, 0)
-
 func (m *Metrics) PrintType(name string, typ string, help string) {
-	m.name = name
-	if help != "" {
-		m.body.WriteString(fmt.Sprintf("# HELP %s %s.\n", name, help))
+	if m.metric_count == nil {
+		m.metric_count = make(map[string]int, 0)
 	}
-	if metric_count[name] == 0 {
+	m.name = name
+	if m.metric_count[name] == 0 {
+		if help != "" {
+			m.body.WriteString(fmt.Sprintf("# HELP %s %s.\n", name, help))
+		}
 		m.body.WriteString(fmt.Sprintf("# TYPE %s %s\n", name, typ))
 	}
-	metric_count[name]++
+	m.metric_count[name]++
 }
 
 func (m *Metrics) PrintFloat(labels string, value float64) {
@@ -537,7 +539,6 @@ func (m *Metrics) CollectKernel() error {
 	return err
 }
 func (m *Metrics) CollectSystemd() error {
-	var typePrinted bool
 	for proc := range service_list {
 		out, err := exec.Command("/usr/bin/systemctl", "--no-pager", "show", proc).Output()
 		if err == nil {
@@ -549,16 +550,12 @@ func (m *Metrics) CollectSystemd() error {
 				}
 				//fmt.Println("NS output = ", parts)
 			}
-			if !typePrinted {
-				m.PrintType("node_systemd_unit_state", "gauge", "Running kernel")
-			}
+			m.PrintType("node_systemd_unit_state", "gauge", "Systemd unit's current state")
 			for _, state := range []string{"activating", "active", "deactiviating", "failed", "inactive"} {
 				m.PrintBool(fmt.Sprintf("name=%q,state=%q", proc, state), state == prop["ActiveState"])
 			}
-			if !typePrinted {
-				m.PrintType("node_systemd_unit_start_time_seconds", "gauge", "Systemd start time since boot")
-				typePrinted = true
-			}
+
+			m.PrintType("node_systemd_unit_start_time_seconds", "gauge", "Systemd start time since boot")
 			//val, _ := time.Parse("2006-01-02T15:04:05.000Z", prop["ActiveEnterTimestamp"])
 			//m.PrintInt(fmt.Sprintf("name=%q", proc), val.Unix())
 			val, _ := strconv.ParseUint(prop["ExecMainStartTimestampMonotonic"], 10, 64)
