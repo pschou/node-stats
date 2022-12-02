@@ -1,15 +1,13 @@
 // License:
 //     MIT License, Copyright phuslu@hotmail.com
-// Usage:
-//     env PORT=9101 SSH_HOST=phus.lu SSH_USER=phuslu SSH_PASS=123456 ./remote_node_exporter
-// TODO:
-//     add ssh compression support
+// Modified by pschou 2020
 
 package main
 
 import (
 	"bufio"
 	"bytes"
+
 	//"compress/gzip"
 	//"encoding/base64"
 	"fmt"
@@ -20,8 +18,8 @@ import (
 	//"net/http"
 	"os"
 	"os/exec"
+
 	//"path"
-	"github.com/pschou/go-params"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -30,6 +28,8 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/pschou/go-params"
 
 	"golang.org/x/crypto/ssh"
 	//"gopkg.in/alecthomas/kingpin.v2"
@@ -536,6 +536,17 @@ func (m *Metrics) CollectKernel() error {
 	out, err := exec.Command("/usr/bin/uname", "-r").Output()
 	m.PrintType("node_kernel_info", "gauge", "Running kernel")
 	m.PrintInt(fmt.Sprintf("version=%q", strings.TrimSpace(string(out))), 1)
+	sr, err := os.Open("/etc/system-release")
+	if err == nil {
+		defer sr.Close()
+		dat := make([]byte, 256)
+		ct, _ := sr.Read(dat)
+		parts := strings.SplitN(strings.TrimSpace(string(dat[:ct])), " release ", 2)
+		if len(parts) == 2 {
+			m.PrintType("node_system_release_info", "gauge", "System Release Info")
+			m.PrintInt(fmt.Sprintf("name=%q,version=%q", parts[0], parts[1]), 1)
+		}
+	}
 	return err
 }
 func (m *Metrics) CollectSystemd() error {
