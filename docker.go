@@ -1,12 +1,16 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"strings"
 	"time"
+
+	apitypes "github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
+	dockerclient "github.com/docker/docker/client"
 )
 
 func Docker_sock(req string) string {
@@ -48,25 +52,50 @@ func Docker_sock(req string) string {
 	}
 	return ""
 }
-func getDocker() []Docker {
-	dockers := make([]Docker, 0)
-	err := json.Unmarshal([]byte(Docker_sock("/v1.18/containers/json")), &dockers)
+
+var Dockers = make(map[string]apitypes.ContainerJSON)
+
+func getDocker() []apitypes.Container {
+	ctx := context.Background()
+	cli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if err != nil {
-		return dockers
+		panic(err)
 	}
-	for i, d := range dockers {
-		cont := Container{}
-		err := json.Unmarshal([]byte(Docker_sock(fmt.Sprintf("/v1.18/containers/%s/json", d.Id))), &cont)
-		if err != nil {
-			continue
+	defer cli.Close()
+
+	containers, err := cli.ContainerList(ctx, containertypes.ListOptions{})
+	if err != nil {
+		panic(err)
+	}
+
+	for _, c := range containers {
+		cj, err := cli.ContainerInspect(ctx, c.ID)
+		//fmt.Printf("Container:%#v\n", c)
+		//fmt.Printf("Container details:%#v\n", cj.ContainerJSONBase)
+		if err == nil {
+			Dockers[c.ID] = cj
 		}
-		dockers[i].cont = cont
-		//fmt.Println("stats: ", Docker_sock(fmt.Sprintf("/v1.19/containers/%s/stats?stream=0", d.Id)))
 	}
-	return dockers
+
+	/*
+		dockers := make([]Docker, 0)
+		err := json.Unmarshal([]byte(Docker_sock("/v1.18/containers/json")), &dockers)
+		if err != nil {
+			return dockers
+		}
+		for i, d := range dockers {
+			cont := Container{}
+			err := json.Unmarshal([]byte(Docker_sock(fmt.Sprintf("/v1.18/containers/%s/json", d.Id))), &cont)
+			if err != nil {
+				continue
+			}
+			dockers[i].cont = cont
+			//fmt.Println("stats: ", Docker_sock(fmt.Sprintf("/v1.19/containers/%s/stats?stream=0", d.Id)))
+		}*/
+	return containers
 }
 
-type Docker struct {
+/*type Docker struct {
 	Id      string
 	Names   []string
 	Image   string
@@ -91,7 +120,7 @@ type Container struct {
 	LogPath      string
 	Name         string
 	RestartCount int64
-}*/
+}
 
 type Container struct {
 	ID      string        `json:"Id"`
@@ -236,4 +265,4 @@ type Container struct {
 		IPAddress              string      `json:"IPAddress"`
 		MacAddress             string      `json:"MacAddress"`
 	} `json:"NetworkSettings"`
-}
+}*/

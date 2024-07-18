@@ -16,6 +16,7 @@ import (
 	//"net"
 	"path/filepath"
 	//"net/http"
+	"log"
 	"os"
 	"os/exec"
 
@@ -29,13 +30,13 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/araddon/dateparse"
 	"github.com/pschou/go-params"
 
 	"golang.org/x/crypto/ssh"
 	//"gopkg.in/alecthomas/kingpin.v2"
 	//"gopkg.in/yaml.v2"
-
-	"github.com/prometheus/common/log"
+	//"github.com/prometheus/common/log"
 	//"github.com/prometheus/common/version"
 	//"github.com/vishvananda/netlink"
 )
@@ -63,7 +64,7 @@ import (
 	return strings.TrimSuffix(s, "/") + "/"
 }()*/
 
-var Dockers = []Docker{}
+// var Dockers = []types.Container{}
 var dms = make(map[string]string, 0)
 var blk_dev = make(map[string]string, 0)
 var docker_labels = make(map[string]string, 0)
@@ -120,15 +121,15 @@ func (c *Client) connect() error {
 	c.client, err = ssh.Dial("tcp", c.Addr, c.Config)
 
 	if err != nil {
-		log.Infof("ssh.Dial(\"tcp\", %#v, ...) error: %+v\n", c.Addr, err)
+		log.Printf("ssh.Dial(\"tcp\", %#v, ...) error: %+v\n", c.Addr, err)
 		return err
 	} else {
-		log.Infof("ssh.Dial(\"tcp\", %#v, ...) ok\n", c.Addr)
+		log.Printf("ssh.Dial(\"tcp\", %#v, ...) ok\n", c.Addr)
 	}
 
 	session, err := c.client.NewSession()
 	if err != nil {
-		log.Infof("%v.NewSession() error: %+v, reconnecting...\n", c.client, err)
+		log.Printf("%v.NewSession() error: %+v, reconnecting...\n", c.client, err)
 		return err
 	}
 
@@ -137,7 +138,7 @@ func (c *Client) connect() error {
 
 	session.Run("date +%z; test -f /usr/bin/timeout; echo $?")
 	parts := strings.Split(b.String(), "\n")
-	log.Infof("session.Run() return %#v\n", parts)
+	log.Printf("session.Run() return %#v\n", parts)
 	s := strings.TrimSpace(parts[0])
 	if len(s) == 5 {
 		h, _ := strconv.Atoi(s[1:3])
@@ -152,7 +153,7 @@ func (c *Client) connect() error {
 	if parts[1] == "0" {
 		c.hasTimeout = true
 	}
-	log.Infof("%#v timezone is %+v, has timeout command is %+v\n", c.Addr, c.timeOffset, c.hasTimeout)
+	log.Printf("%#v timezone is %+v, has timeout command is %+v\n", c.Addr, c.timeOffset, c.hasTimeout)
 
 	return err
 
@@ -163,7 +164,7 @@ func (c *Client) TimeOffset() time.Duration {
 }
 
 func (c *Client) Execute(cmd string) (string, error) {
-	log.Debugf("%T.Execute(%#v)\n", c, cmd)
+	log.Printf("%T.Execute(%#v)\n", c, cmd)
 
 	//if c.client == nil {
 	//	c.connect()
@@ -174,7 +175,7 @@ func (c *Client) Execute(cmd string) (string, error) {
 		session, err := c.client.NewSession()
 		if err != nil {
 			if i < retry-1 {
-				log.Infof("NewSession() error: %+v, reconnecting...\n", err)
+				log.Printf("NewSession() error: %+v, reconnecting...\n", err)
 				c.client.Close()
 				c.connect()
 				continue
@@ -610,8 +611,15 @@ func (m *Metrics) CollectMemory() error {
 			if t != "." {
 				lbl := ""
 				if strings.HasPrefix(t, "docker/") {
-					docker_id := t[7:]
-					lbl = "," + docker_labels[docker_id]
+					docker_id := strings.TrimSuffix(t[7:], ".scope")
+					if docker_labels[docker_id] != "" {
+						lbl = "," + docker_labels[docker_id]
+					}
+				} else if strings.HasPrefix(t, "system.slice/docker-") {
+					docker_id := strings.TrimSuffix(t[20:], ".scope")
+					if docker_labels[docker_id] != "" {
+						lbl = "," + docker_labels[docker_id]
+					}
 				}
 				if strings.HasPrefix(t, "system.slice/") && strings.HasSuffix(t, ".service") {
 					service_id := t[13 : len(t)-8]
@@ -825,8 +833,15 @@ func (m *Metrics) CollectStat() error {
 			if t != "." {
 				lbl := ""
 				if strings.HasPrefix(t, "docker/") {
-					docker_id := t[7:]
-					lbl = "," + docker_labels[docker_id]
+					docker_id := strings.TrimSuffix(t[7:], ".scope")
+					if docker_labels[docker_id] != "" {
+						lbl = "," + docker_labels[docker_id]
+					}
+				} else if strings.HasPrefix(t, "system.slice/docker-") {
+					docker_id := strings.TrimSuffix(t[20:], ".scope")
+					if docker_labels[docker_id] != "" {
+						lbl = "," + docker_labels[docker_id]
+					}
 				}
 				if strings.HasPrefix(t, "system.slice/") && strings.HasSuffix(t, ".service") {
 					service_id := t[13 : len(t)-8]
@@ -866,6 +881,9 @@ func (m *Metrics) CollectStat() error {
 }
 
 func (m *Metrics) CollectNetdev(pid int64, subLabel string) error {
+	if subLabel != "" {
+		subLabel = "," + subLabel
+	}
 	s := ""
 	var err error
 	if pid == 0 {
@@ -1060,8 +1078,15 @@ func (m *Metrics) CollectDiskstats() error {
 			if t != "." {
 				lbl := ""
 				if strings.HasPrefix(t, "docker/") {
-					docker_id := t[7:]
-					lbl = "," + docker_labels[docker_id]
+					docker_id := strings.TrimSuffix(t[7:], ".scope")
+					if docker_labels[docker_id] != "" {
+						lbl = "," + docker_labels[docker_id]
+					}
+				} else if strings.HasPrefix(t, "system.slice/docker-") {
+					docker_id := strings.TrimSuffix(t[20:], ".scope")
+					if docker_labels[docker_id] != "" {
+						lbl = "," + docker_labels[docker_id]
+					}
 				}
 				if strings.HasPrefix(t, "system.slice/") && strings.HasSuffix(t, ".service") {
 					service_id := t[13 : len(t)-8]
@@ -1079,9 +1104,9 @@ func (m *Metrics) CollectDiskstats() error {
 					lines := strings.Split(s, "\n")
 					for _, line := range lines {
 						parts := split(line, -1)
-						if parts[len(parts)-1] == "0" {
-							continue
-						}
+						//if parts[len(parts)-1] == "0" {
+						//	continue
+						//}
 						if len(parts) == 3 {
 							tdev := blk_dev[parts[0]]
 							if tdev != "" {
@@ -1334,10 +1359,10 @@ func (m *Metrics) CollectAll() (string, error) {
 
 	//err = m.PreRead()
 	//if err != nil {
-	//	log.Infof("%T.PreRead() error: %+v\n", m, err)
+	//	log.Printf("%T.PreRead() error: %+v\n", m, err)
 	//}
 
-	Dockers = getDocker() // This needs to be called early because it is used for later routines
+	getDocker() // This needs to be called early because it is used for later routines
 	msec = time.Now().UnixNano() / 1e6
 
 	//m.CollectTime()
@@ -1354,54 +1379,75 @@ func (m *Metrics) CollectAll() (string, error) {
 	m.CollectNetdev(0, "")
 	for _, d := range Dockers {
 		//fmt.Println("docker", d)
-		t := fmt.Sprintf("docker_name=\"%s\",docker_image=\"%s\"", d.cont.Name, d.Image)
-		m.CollectNetdev(d.cont.State.Pid, t)
-		docker_labels[d.Id] = t
+		t := fmt.Sprintf("docker_name=\"%s\",docker_image=\"%s\"", d.Name, d.Image)
+		m.CollectNetdev(int64(d.State.Pid), t)
+		docker_labels[d.ID] = t
 	}
 
 	m.PrintType("node_docker_started_at", "gauge", "Docker created time")
 	for _, d := range Dockers {
-		if d.cont.State.StartedAt.UnixNano() > 0 {
-			m.PrintInt(docker_labels[d.Id], d.cont.State.StartedAt.UnixNano()/1e6)
+		if strings.HasPrefix(d.State.StartedAt, "000") {
+			continue
+		}
+		if t, err := dateparse.ParseAny(d.State.StartedAt); err == nil {
+			m.PrintInt(docker_labels[d.ID], t.UnixNano()/1e6)
 		} else {
-			//m.PrintStr(docker_labels[d.Id], "NaN")
+			//m.PrintStr(docker_labels[d.ID], "NaN")
 		}
 	}
 
-	m.PrintType("node_docker_finished_at", "gauge", "Docker created time")
+	m.PrintType("node_docker_finished_at", "gauge", "Docker finished time")
 	for _, d := range Dockers {
-		if d.cont.State.FinishedAt.UnixNano() > 0 {
-			m.PrintInt(docker_labels[d.Id], d.cont.State.FinishedAt.UnixNano()/1e6)
+		if strings.HasPrefix(d.State.FinishedAt, "000") {
+			continue
+		}
+		if t, err := dateparse.ParseAny(d.State.FinishedAt); err == nil {
+			m.PrintInt(docker_labels[d.ID], t.UnixNano()/1e6)
 		} else {
-			//m.PrintStr(docker_labels[d.Id], "NaN")
+			//m.PrintStr(docker_labels[d.ID], "NaN")
 		}
 	}
 
 	m.PrintType("node_docker_info", "gauge", "Docker info")
 	for _, d := range Dockers {
-		lblarr := make(map[string]string)
-		for l, v := range d.Labels {
-			lblarr[strings.ToLower(l)] = v
-		}
-		lblstr := []string{docker_labels[d.Id]}
-		reg, _ := regexp.Compile("[^a-zA-Z0-9_]+")
-		for l, v := range lblarr {
-			lblstr = append(lblstr, fmt.Sprintf("%s=%q", reg.ReplaceAllString(l, "_"), v))
-		}
-		m.PrintInt(strings.Join(lblstr, ","), 1)
+		/*
+			lblarr := make(map[string]string)
+			for l, v := range d.Labels {
+				lblarr[strings.ToLower(l)] = v
+			}
+			lblstr := []string{docker_labels[d.ID]}
+			reg, _ := regexp.Compile("[^a-zA-Z0-9_]+")
+			for l, v := range lblarr {
+				lblstr = append(lblstr, fmt.Sprintf("%s=%q", reg.ReplaceAllString(l, "_"), v))
+			}
+			m.PrintInt(strings.Join(lblstr, ","), 1)
+		*/
+		m.PrintInt(fmt.Sprintf("%s,processLabel=%q,mountLabel=%q", docker_labels[d.ID], d.ProcessLabel, d.MountLabel), 1)
 	}
 
 	m.PrintType("node_docker_running", "gauge", "Docker container is running")
 	for _, d := range Dockers {
-		m.PrintBool(docker_labels[d.Id], d.cont.State.Running)
+		m.PrintBool(docker_labels[d.ID], d.State.Running)
 	}
 	m.PrintType("node_docker_restarting", "gauge", "Docker container is running")
 	for _, d := range Dockers {
-		m.PrintBool(docker_labels[d.Id], d.cont.State.Restarting)
+		m.PrintBool(docker_labels[d.ID], d.State.Restarting)
 	}
 	m.PrintType("node_docker_restart_count", "gauge", "Docker restart count")
 	for _, d := range Dockers {
-		m.PrintInt(docker_labels[d.Id], d.cont.RestartCount)
+		m.PrintInt(docker_labels[d.ID], int64(d.RestartCount))
+	}
+	m.PrintType("node_docker_size_rw", "gauge", "Docker container size RW")
+	for _, d := range Dockers {
+		if d.SizeRw != nil {
+			m.PrintInt(docker_labels[d.ID], *d.SizeRw)
+		}
+	}
+	m.PrintType("node_docker_size_root", "gauge", "Docker container size Root")
+	for _, d := range Dockers {
+		if d.SizeRootFs != nil {
+			m.PrintInt(docker_labels[d.ID], *d.SizeRootFs)
+		}
 	}
 
 	/*
@@ -1464,13 +1510,13 @@ func (m *Metrics) CollectAll() (string, error) {
 
 	c, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
-		log.Infof("ssh.Dial(%#v) error: %+v\n", addr, err)
+		log.Printf("ssh.Dial(%#v) error: %+v\n", addr, err)
 		return
 	}
 
 	rconn, err := c.Dial("tcp", RemoteAddr)
 	if err != nil {
-		log.Infof("%T.Dial(%#v) error: %+v\n", RemoteAddr, err)
+		log.Printf("%T.Dial(%#v) error: %+v\n", RemoteAddr, err)
 		return
 	}
 
@@ -1483,7 +1529,7 @@ func SetProcessName(name string) error {
 		argv0str := (*reflect.StringHeader)(unsafe.Pointer(&os.Args[0]))
 		argv0 := (*[1 << 30]byte)(unsafe.Pointer(argv0str.Data))[:len(name)+1]
 
-		n := copy(argv0, name+string(0))
+		n := copy(argv0, name+"\x00")
 		if n < len(argv0) {
 			argv0[n] = 0
 		}
