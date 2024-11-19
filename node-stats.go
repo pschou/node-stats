@@ -68,7 +68,7 @@ import (
 var dms = make(map[string]string, 0)
 var blk_dev = make(map[string]string, 0)
 var docker_labels = make(map[string]string, 0)
-var msec int64
+var msec string
 
 var service_list = make(map[string]struct{}, 0)
 
@@ -381,7 +381,7 @@ func (m *Metrics) PrintFloat(labels string, value float64) {
 		m.body.WriteString(fmt.Sprintf("%s ", m.name))
 	}
 
-	m.body.WriteString(fmt.Sprintf("%-16g %d\n", value, msec))
+	m.body.WriteString(fmt.Sprintf("%-16g%s\n", value, msec))
 	//if value >= 1000000 {
 	//	m.body.WriteString(fmt.Sprintf("%e\n", value))
 	//} else {
@@ -397,9 +397,9 @@ func (m *Metrics) PrintBool(labels string, value bool) {
 	}
 
 	if value {
-		m.body.WriteString(fmt.Sprintf("1 %d\n", msec))
+		m.body.WriteString(fmt.Sprintf("1%s\n", msec))
 	} else {
-		m.body.WriteString(fmt.Sprintf("0 %d\n", msec))
+		m.body.WriteString(fmt.Sprintf("0%s\n", msec))
 	}
 }
 
@@ -410,7 +410,7 @@ func (m *Metrics) PrintStr(labels string, value string) {
 		m.body.WriteString(fmt.Sprintf("%s ", m.name))
 	}
 
-	m.body.WriteString(fmt.Sprintf("%s %d\n", value, msec))
+	m.body.WriteString(fmt.Sprintf("%s%s\n", value, msec))
 }
 
 func (m *Metrics) PrintInt(labels string, value int64) {
@@ -423,7 +423,7 @@ func (m *Metrics) PrintInt(labels string, value int64) {
 	//if value >= 1000000 {
 	//	m.body.WriteString(fmt.Sprintf("%g\n", float64(value)))
 	//} else {
-	m.body.WriteString(fmt.Sprintf("%d %d\n", value, msec))
+	m.body.WriteString(fmt.Sprintf("%d%s\n", value, msec))
 	//}
 }
 
@@ -458,7 +458,7 @@ func (m *Metrics) CollectTime() error {
 	if nsec != 0 {
 		m.PrintType("node_time", "counter", "System time in seconds since epoch (1970)")
 		m.PrintInt("", nsec)
-		msec = nsec * 1e3
+		//msec = nsec * 1e3
 	}
 
 	return err
@@ -606,7 +606,7 @@ func (m *Metrics) CollectMemory() error {
 		m.PrintInt("", size)
 	}
 	err = filepath.Walk("/sys/fs/cgroup/memory", func(path string, info os.FileInfo, err error) error {
-		if info.Name() == "memory.stat" {
+		if info != nil && info.Name() == "memory.stat" {
 			t := filepath.Dir(path[22:])
 			if t != "." {
 				lbl := ""
@@ -828,7 +828,7 @@ func (m *Metrics) CollectStat() error {
 	m.PrintInt("", cores)
 
 	err = filepath.Walk("/sys/fs/cgroup/cpu,cpuacct", func(path string, info os.FileInfo, err error) error {
-		if info.Name() == "cpuacct.usage_percpu" {
+		if info != nil && info.Name() == "cpuacct.usage_percpu" {
 			t := filepath.Dir(path[27:])
 			if t != "." {
 				lbl := ""
@@ -1073,7 +1073,7 @@ func (m *Metrics) CollectDiskstats() error {
 	//fmt.Println("readdir", findDirs("/sys/fs/cgroup/blkio", "blkio.throttle.io_serviced"))
 
 	err = filepath.Walk("/sys/fs/cgroup/blkio", func(path string, info os.FileInfo, err error) error {
-		if info.Name() == "blkio.throttle.io_serviced" {
+		if info != nil && info.Name() == "blkio.throttle.io_serviced" {
 			t := filepath.Dir(path[21:])
 			if t != "." {
 				lbl := ""
@@ -1363,7 +1363,6 @@ func (m *Metrics) CollectAll() (string, error) {
 	//}
 
 	getDocker() // This needs to be called early because it is used for later routines
-	msec = time.Now().UnixNano() / 1e6
 
 	//m.CollectTime()
 	m.CollectLoadavg()
@@ -1542,7 +1541,12 @@ var version = "0"
 
 func main() {
 	params.CommandLine.Title = "node-stats, a prometheus metrics collector, Written by Paul Schou (github.com/pschou/node-stats), Version: " + version
+	includeTime := params.Pres("time", "Include time in output")
 	params.Parse()
+
+	if *includeTime {
+		msec = fmt.Sprintf(" %d", time.Now().UnixNano()/1e6)
+	}
 
 	fmt.Println("#ABOUT: NodeStats written by Paul Schou -- https://github.com/pschou/node-stats")
 	/*

@@ -65,7 +65,7 @@ func getDocker() []apitypes.Container {
 
 	containers, err := cli.ContainerList(ctx, containertypes.ListOptions{})
 	if err != nil {
-		panic(err)
+		return nil
 	}
 
 	for _, c := range containers {

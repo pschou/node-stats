@@ -1,8 +1,6 @@
+// Super simple NFTables endpoint for Prometheus
 //
-//  Super simple NFTables endpoint for Prometheus
-//
-//  Written by Paul Schou (github@paulschou.com)
-//
+// Written by Paul Schou (github@paulschou.com)
 package main
 
 import (
@@ -150,11 +148,15 @@ func (m *Metrics) CollectNFTables() {
 					keys = append(keys, fmt.Sprintf("%v=\"%v\"", k, v))
 				}
 			}
-			m.PrintType("nftables_rule_bytes_total", "gauge", "nftables rule matched total bytes")
-			m.PrintStr(strings.Join(keys, ","), fmt.Sprintf("%v", bytes))
+			if bytes != nil {
+				m.PrintType("nftables_rule_bytes_total", "gauge", "nftables rule matched total bytes")
+				m.PrintStr(strings.Join(keys, ","), fmt.Sprintf("%v", bytes))
+			}
 
-			m.PrintType("nftables_rule_bytes_total", "gauge", "nftables rule matched packets")
-			m.PrintStr(strings.Join(keys, ","), fmt.Sprintf("%v", packets))
+			if packets != nil {
+				m.PrintType("nftables_rule_packets_total", "gauge", "nftables rule matched packets")
+				m.PrintStr(strings.Join(keys, ","), fmt.Sprintf("%v", packets))
+			}
 
 			//fmt.Fprintf(w, "nftables_rule_bytes_total{%s} %v\n", strings.Join(keys, ","), bytes)
 			//fmt.Fprintf(w, "nftables_rule_packets_total{%s} %v\n", strings.Join(keys, ","), packets)
